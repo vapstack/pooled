@@ -23,7 +23,9 @@ func (p *Maps[K, V]) Get() map[K]V {
 }
 
 // Put clears m and returns it to the pool unless it exceeds MaxLen.
-// If Cleanup is set, it is called before clearing and discard checks.
+// If Cleanup is set, it is called before clearing.
+// MaxLen is checked against len(m) at the start of Put.
+// Cleanup may mutate m, but those mutations do not affect the retention decision.
 func (p *Maps[K, V]) Put(m map[K]V) {
 	if m != nil {
 		l := len(m)

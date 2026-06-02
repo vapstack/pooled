@@ -98,6 +98,9 @@ func (s *Slices[T]) Get(capHint int) []T {
 
 // Put returns v to the pool if its capacity is retained.
 //
+// Put chooses the bucket from cap(v) at call time. The slice does not need to
+// have the same capacity it had when it was returned by Get.
+//
 // Slices with too small capacity, too large capacity, or too much slack for
 // their bucket are discarded.
 //

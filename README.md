@@ -7,6 +7,9 @@ Typed customizable helpers for pooling entities.
 - `Maps[K, V]` for `map[K]V`
 - `Buffers` for `*bytes.Buffer`
 
+Pools are backed by `sync.Pool`.
+Reuse is opportunistic: values may be dropped by the Go runtime at any time.
+Code must not rely on a later Get returning a previously Put value.
 
 ## Pointers
 
@@ -31,11 +34,18 @@ defer myPool.Put(v)
 ## Slices
 
 `Slices[T]` pools slice backing arrays in power-of-two capacity buckets.
+
 `Get` returns a slice with `len == 0` and `cap >= capHint`.
 If `capHint` is larger than `MaxCap` (rounded to power-of-two),
 the returned slice is allocated but not retained by `Put`.
 If the target bucket is empty, `Get` tries the next three buckets before
 allocating a new slice.
+
+`Put` classifies a slice by its capacity at call time, so a slice may grow while
+in use and still be reused from the matching capacity bucket, as long as its
+current capacity is within `MaxCap` and the bucket slack limit. Retained slices
+are returned by `Get` with the bucket capacity, not with the capacity they had
+at `Put` time.
 
 ```go
 var mySlicePool = pooled.Slices[*MyType]{
@@ -46,7 +56,7 @@ var mySlicePool = pooled.Slices[*MyType]{
     },
 }
 
-s := mySlicePool.Get()
+s := mySlicePool.Get(10000)
 // ...
 mySlicePool.Put(s)
 ```
@@ -57,6 +67,10 @@ Clearing policy:
 - `NoClear` leaves contents unchanged.
 - `ClearLen` clears the current length.
 - `ClearCap` clears the full capacity.
+
+`NoClear` leaves the backing array unchanged.
+This is fastest, but for pointer-containing element types it may keep
+references alive while the slice is retained by the pool.
 
 `Cleanup`, when set, is called by `Put` before clearing and before retention
 checks. It runs for every `Put` call, including nil slices and slices that will
@@ -87,7 +101,7 @@ var buffers = pooled.Buffers{
     MaxCap: 1 << 20,
 }
 
-buf := buffers.Get(10000)
+buf := buffers.Get()
 defer buffers.Put(buf)
 // ...
 ```
