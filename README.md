@@ -37,15 +37,18 @@ defer myPool.Put(v)
 
 `Get` returns a slice with `len == 0` and `cap >= capHint`.
 If `capHint` is larger than `MaxCap` (rounded to power-of-two),
-the returned slice is allocated but not retained by `Put`.
+the returned slice is allocated without consulting the pool.
 If the target bucket is empty, `Get` tries the next three buckets before
 allocating a new slice.
 
 `Put` classifies a slice by its capacity at call time, so a slice may grow while
-in use and still be reused from the matching capacity bucket, as long as its
-current capacity is within `MaxCap` and the bucket slack limit. Retained slices
-are returned by `Get` with the bucket capacity, not with the capacity they had
-at `Put` time.
+in use and still be reused from the matching capacity bucket. A retained slice
+is returned by `Get` with the actual capacity it had at `Put` time.
+
+`Put` uses the bucket whose base is the largest power of two not exceeding the
+slice capacity. It retains every capacity belonging to that bucket, including                                                                                  
+capacities above the bucket's base size. A slice is discarded when its
+capacity is below the minimum bucket or exceeds `MaxCap`.
 
 ```go
 var mySlicePool = pooled.Slices[*MyType]{
@@ -127,6 +130,7 @@ var labels = pooled.Maps[string, string]{
 BenchmarkSlicesGetPut/NoClear-16         52960077        22.47 ns/op       0 B/op       0 allocs/op
 BenchmarkSlicesGetPut/ClearLen-16        41668288        27.76 ns/op       0 B/op       0 allocs/op
 BenchmarkSlicesGetPut/ClearCap-16         9544119       125.9 ns/op        0 B/op       0 allocs/op
+BenchmarkSlicesGetPutGrown-16            33940534        34.74 ns/op       0 B/op       0 allocs/op
 BenchmarkBuffersGetPut-16                67194806        17.42 ns/op       0 B/op       0 allocs/op
 BenchmarkMapsGetPut-16                   56957324        21.38 ns/op       0 B/op       0 allocs/op
 BenchmarkPointersGetPut-16               65206532        18.29 ns/op       0 B/op       0 allocs/op

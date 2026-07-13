@@ -6,11 +6,24 @@ import (
 	"unsafe"
 )
 
+type sliceItem struct {
+	data unsafe.Pointer
+	cap  int
+}
+
+// slicePointer stores a power-of-two-capacity slice without a metadata wrapper.
+type slicePointer unsafe.Pointer
+
+// sliceItemPool is shared by every Slices instantiation.
+var sliceItemPool = sync.Pool{
+	New: func() any { return new(sliceItem) },
+}
+
 // Slices pools []T values.
 //
 // Zero value is ready to use. It must not be copied after first use.
 type Slices[T any] struct {
-	// MaxCap is the maximum requested capacity served from the pool.
+	// MaxCap is the maximum slice capacity served from the pool.
 	// Values <= 0 are treated as 32.
 	//
 	// MaxCap is rounded up to the next power of two.
@@ -50,30 +63,8 @@ const (
 	sliceMaxShift = 27
 )
 
-const (
-	sliceRetainMinSlack   = 64
-	sliceRetainStartShift = 10 // 1 Ki
-	sliceRetainStepShift  = 4  // every x16 capacity halves relative slack
-	sliceRetainBaseShift  = 2  // +25%
-)
-
-var sliceRetainCaps = func() [sliceMaxShift + 1]int {
-	var a [sliceMaxShift + 1]int
-	for sh := range a {
-		a[sh] = retainCapForShift(sh)
-	}
-	return a
-}()
-
-func retainCapForShift(sh int) int {
-	n := 1 << sh
-	k := sliceRetainBaseShift + max(sh-sliceRetainStartShift, 0)/sliceRetainStepShift
-
-	return n + max(n>>k, sliceRetainMinSlack)
-}
-
 // Get returns a slice with len 0 and cap at least capHint.
-// If capHint is larger than MaxCap, Get allocates an unpooled slice.
+// If capHint is larger than MaxCap, Get allocates without consulting the pool.
 func (s *Slices[T]) Get(capHint int) []T {
 	maxShift := min(bits.Len(uint(max(s.MaxCap, sliceMinCap)-1)), sliceMaxShift)
 	maxCap := 1 << maxShift
@@ -86,10 +77,26 @@ func (s *Slices[T]) Get(capHint int) []T {
 	search := min(shift+sliceMaxDistance, maxShift)
 
 	for sh := shift; sh <= search; sh++ {
-		if v := s.pools[sh].Get(); v != nil {
-			n := 1 << sh
-			r := unsafe.Slice(v.(*T), n)
-			return r[:0:n]
+		if raw := s.pools[sh].Get(); raw != nil {
+			switch v := raw.(type) {
+			case slicePointer:
+				n := 1 << sh
+				r := unsafe.Slice((*T)(v), n)
+				return r[:0:n]
+
+			case *sliceItem:
+				c := v.cap
+				r := unsafe.Slice((*T)(v.data), c)
+
+				v.data = nil
+				v.cap = 0
+				sliceItemPool.Put(v)
+
+				return r[:0:c]
+
+			default:
+				panic("pooled: unexpected slice pool item")
+			}
 		}
 	}
 
@@ -101,8 +108,7 @@ func (s *Slices[T]) Get(capHint int) []T {
 // Put chooses the bucket from cap(v) at call time. The slice does not need to
 // have the same capacity it had when it was returned by Get.
 //
-// Slices with too small capacity, too large capacity, or too much slack for
-// their bucket are discarded.
+// Slices with too small capacity or capacity above MaxCap are discarded.
 //
 // If Cleanup is set, it is called before clearing and discard checks.
 func (s *Slices[T]) Put(v []T) {
@@ -115,10 +121,12 @@ func (s *Slices[T]) Put(v []T) {
 	}
 
 	maxShift := min(bits.Len(uint(max(s.MaxCap, sliceMinCap)-1)), sliceMaxShift)
-	shift := bits.Len(uint(c)) - 1 // floor(log2(cap))
-	if shift > maxShift || c > sliceRetainCaps[shift] {
+	maxCap := 1 << maxShift
+	if c > maxCap {
 		return
 	}
+
+	shift := bits.Len(uint(c)) - 1 // floor(log2(cap))
 
 	switch s.Clear {
 	case ClearLen:
@@ -127,6 +135,13 @@ func (s *Slices[T]) Put(v []T) {
 		clear(v[:c])
 	}
 
-	n := 1 << shift
-	s.pools[shift].Put(unsafe.SliceData(v[:n:n]))
+	if c == 1<<shift {
+		s.pools[shift].Put(slicePointer(unsafe.SliceData(v)))
+		return
+	}
+
+	item := sliceItemPool.Get().(*sliceItem)
+	item.data = unsafe.Pointer(unsafe.SliceData(v))
+	item.cap = c
+	s.pools[shift].Put(item)
 }

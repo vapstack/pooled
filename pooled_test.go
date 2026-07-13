@@ -201,20 +201,73 @@ func TestSlicesRejectsOutOfRangeCapacities(t *testing.T) {
 			t.Fatalf("Get reused a slice above MaxCap")
 		}
 	})
+}
 
-	t.Run("too much slack", func(t *testing.T) {
-		const shift = 10
+func TestSlicesMaxCapBoundary(t *testing.T) {
+	skipPoolReuseUnderRace(t)
 
-		p := Slices[int]{MaxCap: 1 << (shift + 1)}
-		v := make([]int, 1, sliceRetainCaps[shift]+1)
+	const (
+		configuredMaxCap = 100
+		effectiveMaxCap  = 128
+	)
+
+	t.Run("at max", func(t *testing.T) {
+		p := Slices[byte]{MaxCap: configuredMaxCap}
+		v := make([]byte, 1, effectiveMaxCap)
 		v[0] = 42
 
 		p.Put(v)
-		got := p.Get(1 << shift)
-		if got[:cap(got)][0] == 42 {
-			t.Fatalf("Get reused a slice above its retain cap")
+		got := p.Get(configuredMaxCap)
+		if cap(got) != effectiveMaxCap {
+			t.Fatalf("cap = %d, want %d", cap(got), effectiveMaxCap)
+		}
+		if got[:cap(got)][0] != 42 {
+			t.Fatalf("reused value = %d, want 42", got[:cap(got)][0])
 		}
 	})
+
+	t.Run("above max", func(t *testing.T) {
+		p := Slices[byte]{MaxCap: configuredMaxCap}
+		v := make([]byte, 1, effectiveMaxCap+1)
+		v[0] = 42
+
+		p.Put(v)
+		got := p.Get(configuredMaxCap)
+		if cap(got) != effectiveMaxCap {
+			t.Fatalf("cap = %d, want %d", cap(got), effectiveMaxCap)
+		}
+		if got[:cap(got)][0] == 42 {
+			t.Fatal("Get reused a slice above MaxCap")
+		}
+	})
+}
+
+func TestSlicesRetainsGrownCapacity(t *testing.T) {
+	skipPoolReuseUnderRace(t)
+
+	const (
+		bucketCap = 64 << 10
+		grownCap  = 90 << 10
+	)
+
+	p := Slices[byte]{MaxCap: 1 << 20}
+	v := make([]byte, 1, grownCap)
+	v[0] = 42
+
+	p.Put(v)
+	got := p.Get(bucketCap)
+	if cap(got) != grownCap {
+		t.Fatalf("cap = %d, want retained cap %d", cap(got), grownCap)
+	}
+	if got[:cap(got)][0] != 42 {
+		t.Fatalf("reused value = %d, want 42", got[:cap(got)][0])
+	}
+
+	p.Put(got)
+	got = p.Get(bucketCap)
+	if cap(got) != grownCap {
+		t.Fatalf("cap after second reuse = %d, want retained cap %d", cap(got), grownCap)
+	}
 }
 
 func TestBuffersGetPut(t *testing.T) {
@@ -496,6 +549,26 @@ func BenchmarkSlicesGetPut(b *testing.B) {
 				p.Put(v)
 			}
 		})
+	}
+}
+
+func BenchmarkSlicesGetPutGrown(b *testing.B) {
+	const (
+		bucketCap = 64 << 10
+		grownCap  = 90 << 10
+	)
+
+	p := Slices[byte]{MaxCap: 1 << 20, Clear: NoClear}
+	p.Put(make([]byte, 0, grownCap))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v := p.Get(bucketCap)
+		if cap(v) < grownCap {
+			v = make([]byte, 0, grownCap)
+		}
+		p.Put(v)
 	}
 }
 
