@@ -9,8 +9,8 @@ import (
 //
 // Zero value is ready to use. It must not be copied after first use.
 type Buffers struct {
-	MinCap int // minimum capacity for newly allocated buffers
-	MaxCap int // maximum capacity retained in the pool
+	MinCap int // MinCap sets initial capacity for newly allocated buffers.
+	MaxCap int // MaxCap sets maximum capacity retained by the pool.
 
 	_    noCopy
 	pool sync.Pool

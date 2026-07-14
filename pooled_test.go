@@ -270,6 +270,159 @@ func TestSlicesRetainsGrownCapacity(t *testing.T) {
 	}
 }
 
+func TestFlatSlicesGetCapacity(t *testing.T) {
+	tests := []struct {
+		name    string
+		minCap  int
+		wantCap int
+	}{
+		{name: "negative", minCap: -1, wantCap: 0},
+		{name: "zero", minCap: 0, wantCap: 0},
+		{name: "positive", minCap: 123, wantCap: 123},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := FlatSlices[int]{NewCap: tt.minCap}
+			got := p.Get()
+			if len(got) != 0 {
+				t.Fatalf("Get() len = %d, want 0", len(got))
+			}
+			if cap(got) != tt.wantCap {
+				t.Fatalf("Get() cap = %d, want %d", cap(got), tt.wantCap)
+			}
+		})
+	}
+}
+
+func TestFlatSlicesReturnsAnyPooledCapacity(t *testing.T) {
+	skipPoolReuseUnderRace(t)
+
+	p := FlatSlices[int]{NewCap: 64, MaxCap: 128}
+	v := make([]int, 1, 7)
+	v[0] = 42
+
+	p.Put(v)
+	got := p.Get()
+	if len(got) != 0 {
+		t.Fatalf("len = %d, want 0", len(got))
+	}
+	if cap(got) != 7 {
+		t.Fatalf("cap = %d, want pooled cap 7", cap(got))
+	}
+	if got[:cap(got)][0] != 42 {
+		t.Fatalf("reused value = %d, want 42", got[:cap(got)][0])
+	}
+}
+
+func TestFlatSlicesCleanupRunsBeforeClear(t *testing.T) {
+	var seen []int
+	p := FlatSlices[int]{
+		MaxCap: sliceMinCap,
+		Clear:  ClearCap,
+		Cleanup: func(v []int) {
+			seen = append(seen, v...)
+		},
+	}
+
+	v := make([]int, 3, sliceMinCap)
+	copy(v, []int{1, 2, 3})
+	p.Put(v)
+
+	if len(seen) != 3 || seen[0] != 1 || seen[1] != 2 || seen[2] != 3 {
+		t.Fatalf("Cleanup saw %v, want [1 2 3]", seen)
+	}
+	for i, x := range v {
+		if x != 0 {
+			t.Fatalf("v[%d] after Put = %d, want 0", i, x)
+		}
+	}
+}
+
+func TestFlatSlicesClearPoliciesOnReuse(t *testing.T) {
+	skipPoolReuseUnderRace(t)
+
+	tests := []struct {
+		name        string
+		clear       SliceClearPolicy
+		wantFirst   int
+		wantPastLen int
+	}{
+		{name: "NoClear", clear: NoClear, wantFirst: 9, wantPastLen: 9},
+		{name: "ClearLen", clear: ClearLen, wantFirst: 0, wantPastLen: 9},
+		{name: "ClearCap", clear: ClearCap, wantFirst: 0, wantPastLen: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := FlatSlices[int]{MaxCap: sliceMinCap, Clear: tt.clear}
+			v := make([]int, 2, sliceMinCap)
+			full := v[:cap(v)]
+			for i := range full {
+				full[i] = 9
+			}
+
+			p.Put(v)
+			got := p.Get()[:cap(v)]
+			if got[0] != tt.wantFirst || got[1] != tt.wantFirst {
+				t.Fatalf("first len elements = [%d %d], want [%d %d]", got[0], got[1], tt.wantFirst, tt.wantFirst)
+			}
+			if got[2] != tt.wantPastLen {
+				t.Fatalf("element beyond len = %d, want %d", got[2], tt.wantPastLen)
+			}
+		})
+	}
+}
+
+func TestFlatSlicesMaxCap(t *testing.T) {
+	skipPoolReuseUnderRace(t)
+
+	const configuredMaxCap = 100
+
+	t.Run("at max", func(t *testing.T) {
+		p := FlatSlices[byte]{NewCap: 8, MaxCap: configuredMaxCap}
+		v := make([]byte, 1, configuredMaxCap)
+		v[0] = 42
+
+		p.Put(v)
+		got := p.Get()
+		if cap(got) != configuredMaxCap {
+			t.Fatalf("cap = %d, want %d", cap(got), configuredMaxCap)
+		}
+		if got[:cap(got)][0] != 42 {
+			t.Fatalf("reused value = %d, want 42", got[:cap(got)][0])
+		}
+	})
+
+	t.Run("above max", func(t *testing.T) {
+		p := FlatSlices[byte]{NewCap: 8, MaxCap: configuredMaxCap}
+		v := make([]byte, 1, configuredMaxCap+1)
+		v[0] = 42
+
+		p.Put(v)
+		got := p.Get()
+		if cap(got) != p.NewCap {
+			t.Fatalf("cap = %d, want newly allocated cap %d", cap(got), p.NewCap)
+		}
+	})
+}
+
+func TestFlatSlicesCleanupRunsForDiscardedSlices(t *testing.T) {
+	calls := 0
+	p := FlatSlices[int]{
+		MaxCap: sliceMinCap,
+		Cleanup: func([]int) {
+			calls++
+		},
+	}
+
+	p.Put(nil)
+	p.Put(make([]int, 0, sliceMinCap+1))
+	if calls != 2 {
+		t.Fatalf("Cleanup calls = %d, want 2", calls)
+	}
+}
+
 func TestBuffersGetPut(t *testing.T) {
 	t.Run("MinCap", func(t *testing.T) {
 		p := Buffers{MinCap: 64}
@@ -568,6 +721,19 @@ func BenchmarkSlicesGetPutGrown(b *testing.B) {
 		if cap(v) < grownCap {
 			v = make([]byte, 0, grownCap)
 		}
+		p.Put(v)
+	}
+}
+
+func BenchmarkFlatSlicesGetPut(b *testing.B) {
+	p := FlatSlices[int]{NewCap: 1024, MaxCap: 1 << 20, Clear: NoClear}
+	v := p.Get()
+	p.Put(v)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v := p.Get()[:64]
 		p.Put(v)
 	}
 }

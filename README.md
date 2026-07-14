@@ -4,12 +4,12 @@ Typed customizable helpers for pooling entities.
 
 - `Pointers[T]` for `*T`
 - `Slices[T]` for `[]T` (using capacity buckets)
+- `FlatSlices[T]` for `[]T` (using a single pool)
 - `Maps[K, V]` for `map[K]V`
 - `Buffers` for `*bytes.Buffer`
 
 Pools are backed by `sync.Pool`.
 Reuse is opportunistic: values may be dropped by the Go runtime at any time.
-Code must not rely on a later Get returning a previously Put value.
 
 ## Pointers
 
@@ -52,8 +52,8 @@ capacity is below the minimum bucket or exceeds `MaxCap`.
 
 ```go
 var mySlicePool = pooled.Slices[*MyType]{
-    MaxCap: 64 << 10,       // default is 32
-    Clear:  pooled.NoClear, // default is NoClear
+    MaxCap:  64 << 10,       // default is 32
+    Clear:   pooled.NoClear, // default is NoClear
     Cleanup: func(v []*MyType) {
         // optional cleanup
     },
@@ -64,7 +64,7 @@ s := mySlicePool.Get(10000)
 mySlicePool.Put(s)
 ```
 
-`MaxCap` is rounded up to the next power of two. `MaxCap <= 0` is treated as 32.
+`MaxCap` is rounded up to the next power of two. `MaxCap <= 32` is treated as 32.
 
 Clearing policy:
 - `NoClear` leaves contents unchanged.
@@ -79,6 +79,26 @@ references alive while the slice is retained by the pool.
 checks. It runs for every `Put` call, including nil slices and slices that will
 be discarded.
 
+## Flat slices
+
+`FlatSlices[T]` is a simpler single-pool variant of `Slices[T]`.
+`Get` has no capacity hint and returns any available slice with `len == 0`,
+regardless of its capacity. When the pool is empty, it allocates a slice
+with `NewCap` capacity. `MaxCap <= 32` is treated as 32, larger values are
+used as is. `Clear` and `Cleanup` behave as they do for `Slices`.
+
+```go
+var flatSlicePool = pooled.FlatSlices[byte]{
+    NewCap: 4 << 10,
+    MaxCap: 64 << 10,
+    Clear:  pooled.NoClear,
+}
+
+s := flatSlicePool.Get()
+// ...
+flatSlicePool.Put(s)
+```
+
 ## Shared slice pools
 
 The package includes shared pools for common scalar slice types:
@@ -91,7 +111,7 @@ pooled.ReleaseUint64Slice(b)
 
 Helpers are available for `bool`, `byte`, `int`, `int32`, `int64`, `uint`,
 `uint32`, `uint64`, `float32`, `float64`, and `string`. Only string slices are
-cleared before retention.
+cleared before retention. These pools use the bucketed `Slices` implementation.
 
 ## Buffers
 
@@ -131,6 +151,7 @@ BenchmarkSlicesGetPut/NoClear-16         52960077        22.47 ns/op       0 B/o
 BenchmarkSlicesGetPut/ClearLen-16        41668288        27.76 ns/op       0 B/op       0 allocs/op
 BenchmarkSlicesGetPut/ClearCap-16         9544119       125.9 ns/op        0 B/op       0 allocs/op
 BenchmarkSlicesGetPutGrown-16            33940534        34.74 ns/op       0 B/op       0 allocs/op
+BenchmarkFlatSlicesGetPut-16             36189553        33.15 ns/op       0 B/op       0 allocs/op
 BenchmarkBuffersGetPut-16                67194806        17.42 ns/op       0 B/op       0 allocs/op
 BenchmarkMapsGetPut-16                   56957324        21.38 ns/op       0 B/op       0 allocs/op
 BenchmarkPointersGetPut-16               65206532        18.29 ns/op       0 B/op       0 allocs/op

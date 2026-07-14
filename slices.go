@@ -14,7 +14,7 @@ type sliceItem struct {
 // slicePointer stores a power-of-two-capacity slice without a metadata wrapper.
 type slicePointer unsafe.Pointer
 
-// sliceItemPool is shared by every Slices instantiation.
+// sliceItemPool is shared by every Slices and FlatSlices instantiation.
 var sliceItemPool = sync.Pool{
 	New: func() any { return new(sliceItem) },
 }
@@ -24,7 +24,7 @@ var sliceItemPool = sync.Pool{
 // Zero value is ready to use. It must not be copied after first use.
 type Slices[T any] struct {
 	// MaxCap is the maximum slice capacity served from the pool.
-	// Values <= 0 are treated as 32.
+	// Values <= 32 are treated as 32.
 	//
 	// MaxCap is rounded up to the next power of two.
 	MaxCap int
@@ -38,6 +38,29 @@ type Slices[T any] struct {
 
 	_     noCopy
 	pools [sliceMaxShift + 1]sync.Pool
+}
+
+// FlatSlices pools []T values in a single pool, regardless of capacity.
+//
+// Zero value is ready to use. It must not be copied after first use.
+type FlatSlices[T any] struct {
+	// NewCap is the capacity used when allocating a new slice.
+	// Values <= 0 allocate a slice with default capacity.
+	NewCap int
+
+	// MaxCap is the maximum slice capacity served from the pool.
+	// Values <= 32 are treated as 32.
+	MaxCap int
+
+	// Clear controls how slices are cleared before returning to the pool.
+	Clear SliceClearPolicy
+
+	// Cleanup is called by Put before clearing and retention checks.
+	// It is called for every Put call, including nil and discarded slices.
+	Cleanup func([]T)
+
+	_    noCopy
+	pool sync.Pool
 }
 
 // SliceClearPolicy controls how a slice is cleared before pooling.
@@ -95,7 +118,7 @@ func (s *Slices[T]) Get(capHint int) []T {
 				return r[:0:c]
 
 			default:
-				panic("pooled: unexpected slice pool item")
+				panic("pooled: unexpected slice pool value type")
 			}
 		}
 	}
@@ -103,7 +126,7 @@ func (s *Slices[T]) Get(capHint int) []T {
 	return make([]T, 0, 1<<shift)
 }
 
-// Put returns v to the pool if its capacity is retained.
+// Put returns v to the pool.
 //
 // Put chooses the bucket from cap(v) at call time. The slice does not need to
 // have the same capacity it had when it was returned by Get.
@@ -144,4 +167,56 @@ func (s *Slices[T]) Put(v []T) {
 	item.data = unsafe.Pointer(unsafe.SliceData(v))
 	item.cap = c
 	s.pools[shift].Put(item)
+}
+
+// Get returns a slice with len 0.
+// It allocates a new slice with capacity NewCap when the pool is empty.
+func (s *FlatSlices[T]) Get() []T {
+	if raw := s.pool.Get(); raw != nil {
+		item, ok := raw.(*sliceItem)
+		if !ok {
+			panic("pooled: unexpected flat slice pool value type")
+		}
+
+		c := item.cap
+		r := unsafe.Slice((*T)(item.data), c)
+
+		item.data = nil
+		item.cap = 0
+		sliceItemPool.Put(item)
+
+		return r[:0:c]
+	}
+	if s.NewCap > 0 {
+		return make([]T, 0, s.NewCap)
+	}
+	return make([]T, 0)
+}
+
+// Put returns v to the pool.
+//
+// Slices with zero capacity or capacity above MaxCap are discarded.
+//
+// If Cleanup is set, it is called before clearing and discard checks.
+func (s *FlatSlices[T]) Put(v []T) {
+	if s.Cleanup != nil {
+		s.Cleanup(v)
+	}
+
+	c := cap(v)
+	if c == 0 || c > max(s.MaxCap, sliceMinCap) {
+		return
+	}
+
+	switch s.Clear {
+	case ClearLen:
+		clear(v)
+	case ClearCap:
+		clear(v[:c])
+	}
+
+	item := sliceItemPool.Get().(*sliceItem)
+	item.data = unsafe.Pointer(unsafe.SliceData(v))
+	item.cap = c
+	s.pool.Put(item)
 }

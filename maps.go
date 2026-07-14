@@ -7,7 +7,7 @@ import "sync"
 // Zero value is ready to use. It must not be copied after first use.
 type Maps[K comparable, V any] struct {
 	NewCap  int           // NewCap sets initial capacity used when allocating a new map.
-	MaxLen  int           // MaxLen limits maximum length retained in the pool
+	MaxLen  int           // MaxLen limits maximum length retained by the pool
 	Cleanup func(map[K]V) // Cleanup is called by Put before clear and MaxLen checks
 
 	_    noCopy
